@@ -704,7 +704,7 @@ public class Application extends Controller {
       results = AppResult.find.select(
           AppResult.getSearchFields() + "," + AppResult.TABLE.FLOW_EXEC_ID + "," + AppResult.TABLE.FLOW_EXEC_URL)
           .where()
-          .eq(AppResult.TABLE.JOB_DEF_ID, jobDefPair.getId())
+          .eq(AppResult.TABLE.NAME, jobDefPair.getId())
           .order()
           .desc(AppResult.TABLE.FINISH_TIME)
           .setMaxRows(JOB_HISTORY_LIMIT)
@@ -1356,6 +1356,72 @@ public class Application extends Controller {
     return ok(new Gson().toJson(sortedDatasets));
   }
 
+  public static Result restJobMetricsGraphDataByName(String jobName) {
+    JsonArray datasets = new JsonArray();
+    if (jobName == null || jobName.isEmpty()) {
+      return ok(new Gson().toJson(datasets));
+    }
+
+    List<AppResult> results = getRestJobNameResults(jobName);
+
+    if (results.size() == 0) {
+      logger.info("No results for Job url");
+    }
+    Map<IdUrlPair, List<AppResult>> flowExecIdToJobsMap =
+      ControllerUtil.limitHistoryResults(ControllerUtil.groupJobs(results, ControllerUtil.GroupBy.FLOW_EXECUTION_ID), results.size(), MAX_HISTORY_LIMIT);
+
+    // Compute the graph data starting from the earliest available execution to latest
+    List<IdUrlPair> keyList = new ArrayList<IdUrlPair>(flowExecIdToJobsMap.keySet());
+    for (int i = keyList.size() - 1; i >= 0; i--) {
+      IdUrlPair flowExecPair = keyList.get(i);
+      int jobPerfScore = 0;
+      JsonArray stageMetrics = new JsonArray();
+      List<AppResult> mrJobsList = Lists.reverse(flowExecIdToJobsMap.get(flowExecPair));
+
+      long totalMemoryUsed = 0;
+      long totalMemoryWasted = 0;
+      long totalDelay = 0;
+
+      for (AppResult appResult : flowExecIdToJobsMap.get(flowExecPair)) {
+
+        // Each MR job triggered by jobDefId for flowExecId
+        int mrPerfScore = 0;
+
+        for (AppHeuristicResult appHeuristicResult : appResult.yarnAppHeuristicResults) {
+          mrPerfScore += appHeuristicResult.score;
+        }
+
+        // A particular mr stage
+        JsonObject stageMetric = new JsonObject();
+        stageMetric.addProperty("stageid", appResult.id);
+        stageMetric.addProperty("runtime", appResult.finishTime - appResult.startTime);
+        stageMetric.addProperty("waittime", appResult.totalDelay);
+        stageMetric.addProperty("resourceused", appResult.resourceUsed);
+        stageMetric.addProperty("resourcewasted", appResult.resourceWasted);
+
+        stageMetrics.add(stageMetric);
+        jobPerfScore += mrPerfScore;
+        totalMemoryUsed += appResult.resourceUsed;
+        totalMemoryWasted += appResult.resourceWasted;
+      }
+
+      // Execution record
+      JsonObject dataset = new JsonObject();
+      dataset.addProperty("flowtime", Utils.getFlowTime(mrJobsList.get(mrJobsList.size() - 1)));
+      dataset.addProperty("runtime", Utils.getTotalRuntime(mrJobsList));
+      dataset.addProperty("waittime", Utils.getTotalWaittime(mrJobsList));
+      dataset.addProperty("resourceused", totalMemoryUsed);
+      dataset.addProperty("resourcewasted", totalMemoryWasted);
+      dataset.add("jobmetrics", stageMetrics);
+
+      datasets.add(dataset);
+    }
+
+    JsonArray sortedDatasets = Utils.sortJsonArray(datasets);
+
+    return ok(new Gson().toJson(sortedDatasets));
+  }
+
   /**
    *
    * @param startTime - beginning of the time window
@@ -1522,6 +1588,24 @@ public class Application extends Controller {
         .setMaxRows(JOB_HISTORY_LIMIT)
         .fetch(AppResult.TABLE.APP_HEURISTIC_RESULTS, "*")
         .findList();
+
+    return results;
+  }
+
+  /**
+   * Returns a list of AppResults after quering the FLOW_EXEC_ID from the database
+   * @return The list of AppResults
+   */
+  private static List<AppResult> getRestJobNameResults(String jobName) {
+    List<AppResult> results = AppResult.find.select(
+      AppResult.getSearchFields() + "," + AppResult.TABLE.FLOW_EXEC_ID + "," + AppResult.TABLE.FLOW_EXEC_URL)
+      .where()
+      .eq(AppResult.TABLE.NAME, jobName)
+      .order()
+      .desc(AppResult.TABLE.FINISH_TIME)
+      .setMaxRows(JOB_HISTORY_LIMIT)
+      .fetch(AppResult.TABLE.APP_HEURISTIC_RESULTS, "*")
+      .findList();
 
     return results;
   }
